@@ -737,7 +737,8 @@ class TestBuildKiroPayload:
     def test_handles_assistant_as_last_message(self):
         """
         What it does: Verifies handling of assistant as last message.
-        Purpose: Ensure "(empty placeholder)" message is created.
+        Purpose: Ensure assistantResponseMessage is used directly in currentMessage
+                 without injecting a synthetic user placeholder.
         """
         print("Setup: Request with assistant at the end...")
         request = ChatCompletionRequest(
@@ -752,8 +753,14 @@ class TestBuildKiroPayload:
         result = build_kiro_payload(request, "conv-123", "")
         
         print(f"Result: {result}")
-        current_content = result["conversationState"]["currentMessage"]["userInputMessage"]["content"]
-        assert current_content == "(empty placeholder)"
+        current_message = result["conversationState"]["currentMessage"]
+        assert "assistantResponseMessage" in current_message, (
+            "Expected assistantResponseMessage in currentMessage when last message is assistant"
+        )
+        assert "userInputMessage" not in current_message, (
+            "Should not inject synthetic userInputMessage when last message is assistant"
+        )
+        assert current_message["assistantResponseMessage"]["content"] == "Hi there"
     
     def test_raises_for_empty_messages(self):
         """
