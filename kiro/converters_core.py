@@ -1157,12 +1157,10 @@ def ensure_first_message_is_user(messages: List[UnifiedMessage]) -> List[Unified
     Ensures that the first message in the conversation is from user role.
     
     Kiro API requires conversations to start with a user message. If the first
-    message is from assistant (or any other non-user role), we prepend a minimal
-    synthetic user message.
-    
-    This matches LiteLLM behavior for Anthropic API compatibility and fixes
-    issue #60 where conversations starting with assistant messages cause
-    "Improperly formed request" errors.
+    message is from assistant (or any other non-user role), a minimal synthetic
+    user message is prepended. This synthetic message goes into history (not
+    currentMessage), so the following assistant reply provides immediate context
+    and the model's reasoning chain is not disrupted.
     
     Args:
         messages: List of messages in unified format
@@ -1183,21 +1181,18 @@ def ensure_first_message_is_user(messages: List[UnifiedMessage]) -> List[Unified
     """
     if not messages:
         return messages
-    
+
     if messages[0].role != "user":
         logger.debug(
             f"First message is '{messages[0].role}', prepending synthetic user message "
             f"(Kiro API requires conversations to start with user)"
         )
-        # Create minimal synthetic user message (matches LiteLLM behavior)
-        # Using "(empty placeholder)" as minimal valid content to avoid disrupting conversation context
         synthetic_user = UnifiedMessage(
             role="user",
             content="(empty placeholder)"
         )
-        
         return [synthetic_user] + messages
-    
+
     return messages
 
 
@@ -1258,20 +1253,21 @@ def normalize_message_roles(messages: List[UnifiedMessage]) -> List[UnifiedMessa
 
 def ensure_alternating_roles(messages: List[UnifiedMessage]) -> List[UnifiedMessage]:
     """
-    Ensures alternating user/assistant roles by inserting synthetic assistant messages.
+    Ensures alternating user/assistant roles by merging consecutive user messages.
     
     Kiro API requires alternating userInputMessage and assistantResponseMessage.
-    When consecutive user messages are detected, synthetic assistant messages
-    with "(empty placeholder)" placeholder are inserted between them to maintain alternation.
+    When consecutive user messages are detected, they are merged into a single
+    user message (joined with newline) rather than inserting synthetic assistant
+    placeholders that mislead the model.
     
-    This fixes multiple unknown roles (converted to user)
-    create consecutive userInputMessage entries that violate Kiro API requirements.
+    This fixes multiple unknown roles (converted to user) creating consecutive
+    userInputMessage entries that violate Kiro API requirements.
     
     Args:
         messages: List of messages in unified format
     
     Returns:
-        List of messages with synthetic assistant messages inserted where needed
+        List of messages with consecutive user messages merged
     
     Example:
         >>> messages = [
@@ -1281,35 +1277,39 @@ def ensure_alternating_roles(messages: List[UnifiedMessage]) -> List[UnifiedMess
         ... ]
         >>> result = ensure_alternating_roles(messages)
         >>> len(result)
-        5  # 3 user + 2 synthetic assistant
-        >>> result[1].role
-        'assistant'
-        >>> result[1].content
-        '(empty placeholder)'
+        1
+        >>> result[0].role
+        'user'
+        >>> result[0].content
+        'First\nSecond\nThird'
     """
     if not messages or len(messages) < 2:
         return messages
-    
-    result = [messages[0]]
-    synthetic_count = 0
-    
-    for msg in messages[1:]:
-        prev_role = result[-1].role
-        
-        # If both current and previous are user → insert synthetic assistant
-        if msg.role == "user" and prev_role == "user":
-            synthetic_assistant = UnifiedMessage(
-                role="assistant",
-                content="(empty placeholder)"  # Consistent with build_kiro_history() placeholder
+
+    result: List[UnifiedMessage] = []
+    merge_count = 0
+
+    for msg in messages:
+        if result and msg.role == result[-1].role == "user":
+            # Merge into the previous user message
+            prev = result[-1]
+            prev_text = extract_text_content(prev.content)
+            curr_text = extract_text_content(msg.content)
+            merged_content = f"{prev_text}\n{curr_text}" if prev_text else curr_text
+            result[-1] = UnifiedMessage(
+                role="user",
+                content=merged_content,
+                tool_calls=prev.tool_calls,
+                tool_results=(prev.tool_results or []) + (msg.tool_results or []),
+                images=(prev.images or []) + (msg.images or []),
             )
-            result.append(synthetic_assistant)
-            synthetic_count += 1
-        
-        result.append(msg)
-    
-    if synthetic_count > 0:
-        logger.debug(f"Inserted {synthetic_count} synthetic assistant message(s) to ensure alternation")
-    
+            merge_count += 1
+        else:
+            result.append(msg)
+
+    if merge_count > 0:
+        logger.debug(f"Merged {merge_count} consecutive user message(s) to ensure alternation")
+
     return result
 
 
