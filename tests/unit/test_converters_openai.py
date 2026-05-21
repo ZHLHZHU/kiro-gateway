@@ -737,8 +737,8 @@ class TestBuildKiroPayload:
     def test_handles_assistant_as_last_message(self):
         """
         What it does: Verifies handling of assistant as last message.
-        Purpose: Ensure assistantResponseMessage is used directly in currentMessage
-                 without injecting a synthetic user placeholder.
+        Purpose: Ensure assistant message is moved to history and a continuation
+                 prompt is injected as currentMessage userInputMessage.
         """
         print("Setup: Request with assistant at the end...")
         request = ChatCompletionRequest(
@@ -754,13 +754,16 @@ class TestBuildKiroPayload:
         
         print(f"Result: {result}")
         current_message = result["conversationState"]["currentMessage"]
-        assert "assistantResponseMessage" in current_message, (
-            "Expected assistantResponseMessage in currentMessage when last message is assistant"
+        # currentMessage must always be userInputMessage (Kiro API requirement)
+        assert "userInputMessage" in current_message
+        current_content = current_message["userInputMessage"]["content"]
+        assert "Continue" in current_content
+
+        # The original assistant message should be in history
+        history = result["conversationState"]["history"]
+        assert any("assistantResponseMessage" in h for h in history), (
+            "Original assistant message should be moved to history"
         )
-        assert "userInputMessage" not in current_message, (
-            "Should not inject synthetic userInputMessage when last message is assistant"
-        )
-        assert current_message["assistantResponseMessage"]["content"] == "Hi there"
     
     def test_raises_for_empty_messages(self):
         """

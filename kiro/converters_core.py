@@ -43,6 +43,7 @@ from kiro.config import (
     FAKE_REASONING_BUDGET_CAP,
     KIRO_MAX_PAYLOAD_BYTES,
     AUTO_TRIM_PAYLOAD,
+    ASSISTANT_CONTINUATION_PROMPT,
 )
 from kiro.payload_guards import check_payload_size, trim_payload_to_limit
 
@@ -1502,78 +1503,81 @@ def build_kiro_payload(
     if full_system_prompt and not history:
         current_content = f"{full_system_prompt}\n\n{current_content}"
     
-    # Assemble currentMessage based on role
+    # Assemble currentMessage — Kiro API requires currentMessage to always be userInputMessage.
+    # When the last client message is assistant (prefill scenario), we move it into history
+    # and send a guiding synthetic user message so the model continues naturally.
     if current_message.role == "assistant":
-        # Send assistant message directly as assistantResponseMessage.
-        # There is no verified API constraint requiring currentMessage to be a user message;
-        # injecting a synthetic user placeholder causes the model to misinterpret the context.
-        logger.debug("Last message is assistant — using assistantResponseMessage in currentMessage")
-        current_message_payload: Dict[str, Any] = {
+        history.append({
             "assistantResponseMessage": {
                 "content": current_content
             }
-        }
+        })
+        current_content = ASSISTANT_CONTINUATION_PROMPT
+        logger.debug(
+            "Last message is assistant — moved to history, injecting continuation prompt as currentMessage"
+        )
+
+    # If content is empty - use placeholder
+    if not current_content:
+        current_content = "(empty placeholder)"
+
+    # Process images in current message - extract from message or content
+    # IMPORTANT: images go directly into userInputMessage, NOT into userInputMessageContext
+    # This matches the native Kiro IDE format
+    images = current_message.images or extract_images_from_content(current_message.content)
+    kiro_images = None
+    if images:
+        kiro_images = convert_images_to_kiro_format(images)
+        if kiro_images:
+            logger.debug(f"Added {len(kiro_images)} image(s) to current message")
+
+    # Build user_input_context for tools and toolResults only (NOT images)
+    user_input_context: Dict[str, Any] = {}
+
+    # Add tools if present
+    kiro_tools = convert_tools_to_kiro_format(processed_tools)
+    if kiro_tools:
+        user_input_context["tools"] = kiro_tools
+
+    # Process tool_results in current message - convert to Kiro format if present
+    if current_message.tool_results:
+        # Convert unified format to Kiro format
+        kiro_tool_results = convert_tool_results_to_kiro_format(current_message.tool_results)
+        if kiro_tool_results:
+            user_input_context["toolResults"] = kiro_tool_results
     else:
-        # If content is empty - use placeholder
-        if not current_content:
-            current_content = "(empty placeholder)"
+        # Try to extract from content (already in Kiro format)
+        tool_results = extract_tool_results_from_content(current_message.content)
+        if tool_results:
+            user_input_context["toolResults"] = tool_results
 
-        # Process images in current message - extract from message or content
-        # IMPORTANT: images go directly into userInputMessage, NOT into userInputMessageContext
-        # This matches the native Kiro IDE format
-        images = current_message.images or extract_images_from_content(current_message.content)
-        kiro_images = None
-        if images:
-            kiro_images = convert_images_to_kiro_format(images)
-            if kiro_images:
-                logger.debug(f"Added {len(kiro_images)} image(s) to current message")
-
-        # Build user_input_context for tools and toolResults only (NOT images)
-        user_input_context: Dict[str, Any] = {}
-
-        # Add tools if present
-        kiro_tools = convert_tools_to_kiro_format(processed_tools)
-        if kiro_tools:
-            user_input_context["tools"] = kiro_tools
-
-        # Process tool_results in current message - convert to Kiro format if present
-        if current_message.tool_results:
-            # Convert unified format to Kiro format
-            kiro_tool_results = convert_tool_results_to_kiro_format(current_message.tool_results)
-            if kiro_tool_results:
-                user_input_context["toolResults"] = kiro_tool_results
-        else:
-            # Try to extract from content (already in Kiro format)
-            tool_results = extract_tool_results_from_content(current_message.content)
-            if tool_results:
-                user_input_context["toolResults"] = tool_results
-
-        # Inject thinking tags if enabled (only for the current/last user message)
+    # Inject thinking tags if enabled (only for the current/last user message)
+    if current_message.role == "user":
         current_content = inject_thinking_tags(current_content, thinking_config)
 
-        # Build userInputMessage
-        user_input_message: Dict[str, Any] = {
-            "content": current_content,
-            "modelId": model_id,
-            "origin": "AI_EDITOR",
-        }
+    # Build userInputMessage
+    user_input_message: Dict[str, Any] = {
+        "content": current_content,
+        "modelId": model_id,
+        "origin": "AI_EDITOR",
+    }
 
-        # Add images directly to userInputMessage (NOT to userInputMessageContext)
-        if kiro_images:
-            user_input_message["images"] = kiro_images
+    # Add images directly to userInputMessage (NOT to userInputMessageContext)
+    if kiro_images:
+        user_input_message["images"] = kiro_images
 
-        # Add user_input_context if present (contains tools and toolResults only)
-        if user_input_context:
-            user_input_message["userInputMessageContext"] = user_input_context
-
-        current_message_payload = {"userInputMessage": user_input_message}
+    # Add user_input_context if present (contains tools and toolResults only)
+    if user_input_context:
+        user_input_message["userInputMessageContext"] = user_input_context
 
     # Assemble final payload
     payload = {
         "conversationState": {
             "chatTriggerType": "MANUAL",
             "conversationId": conversation_id,
-            "currentMessage": current_message_payload
+            "currentMessage": {
+                "userInputMessage": user_input_message
+            }
         }
     }
     

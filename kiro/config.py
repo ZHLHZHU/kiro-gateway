@@ -548,6 +548,24 @@ ACCOUNT_CACHE_TTL: int = int(os.getenv("ACCOUNT_CACHE_TTL", "43200"))
 STATE_SAVE_INTERVAL_SECONDS: int = int(os.getenv("STATE_SAVE_INTERVAL_SECONDS", "10"))
 
 # ==================================================================================================
+# Synthetic Message Placeholders
+# ==================================================================================================
+
+# Used when the first message in history is not from user (Kiro API requires user-first).
+# This goes into history followed immediately by the real assistant reply, so the model
+# sees it as a minimal conversation opener and is not misled.
+SYNTHETIC_FIRST_USER_CONTENT: str = "(empty placeholder)"
+
+# Used when the last message sent by the client is an assistant message (prefill scenario).
+# Kiro API requires currentMessage to be a userInputMessage, so we must wrap the assistant
+# message in history and send a synthetic user turn. The text guides the model to continue
+# naturally rather than treating it as a new empty request.
+ASSISTANT_CONTINUATION_PROMPT: str = (
+    "Continue from your last response. "
+    "If you have already completed the task, briefly confirm completion."
+)
+
+# ==================================================================================================
 # Application Version
 # ==================================================================================================
 
